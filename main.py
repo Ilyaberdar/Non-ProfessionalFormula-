@@ -6,13 +6,13 @@ import time
 import asyncio
 import traceback
 from deep_translator import GoogleTranslator
-from components.news_fwtcher import FetcherNews
+from components.news_fetcher import FetcherNews
 from components.analyzer_openAI import GPTAnalyzer
 from components.telegram_publisher import TelegramPublisher
 
 API_KEY = "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"
-telegram = TelegramPublisher(telegram_token="7666384903:AAETh0eJWqWH4huy9h9Bpoyz45D0T7hJuoQ", chat_id="@war_analytics_u")
-telegramLog = TelegramPublisher(telegram_token="7666384903:AAETh0eJWqWH4huy9h9Bpoyz45D0T7hJuoQ", chat_id="-1002729684571")
+telegram = TelegramPublisher(telegram_token="1111111111:AAAAAA******", chat_id="****")
+telegramLog = TelegramPublisher(telegram_token="1111111111:AAAAAA******", chat_id="****")
 
 with open("config/prompts/prompts.json", "r", encoding="utf-8") as f:
     prompts = json.load(f)

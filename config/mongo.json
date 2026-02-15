@@ -1,0 +1,5 @@
+{
+  "uri": "mongodb+srv://Ilya:2bW9zyrMlhrzH10I@cluster0.u4zigyg.mongodb.net/?retryWrites=true&w=majority",
+  "db": "news_bot",
+  "collection": "articles"
+}
