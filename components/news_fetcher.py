@@ -1,20 +1,32 @@
-import re
 import os
-
+import re
 import json
+import time
+from datetime import datetime
 from html import unescape
 
 import feedparser
 from pymongo import MongoClient
 
-from datetime import datetime
 from components.logger import setup_logger
-
-from datetime import datetime
-import time
 
 
 class FetcherNews:
+    DEFAULT_F1_PATTERNS = [
+        r"\bf1\b",
+        r"\bformula[\s-]?1\b",
+        r"\bgrand prix\b",
+        r"\bfia\b",
+        r"\bverstappen\b",
+        r"\bhamilton\b",
+        r"\bleclerc\b",
+        r"\bnorris\b",
+        r"\bred bull\b",
+        r"\bmercedes\b",
+        r"\bferrari\b",
+        r"\bmclaren\b",
+    ]
+
     def __init__(self, source_links, keywords_file, mongo_config, pool_interval, max_items_per_feed):
         self.logger = setup_logger()
         self.logger.info("Initializing FetcherNews")
@@ -25,7 +37,11 @@ class FetcherNews:
         self.max_items_per_feed = max_items_per_feed
         self.mongo_client = None
         self.mongo_collection = None
-        self._connect_to_mongo(mongo_config)
+        self.mongo_enabled = bool(mongo_config)
+        if mongo_config:
+            self._connect_to_mongo(mongo_config)
+        else:
+            self.logger.info("MongoDB connection disabled.")
 
         try:
             self.sources = self._load_sources(source_links)
@@ -36,24 +52,11 @@ class FetcherNews:
 
         try:
             raw_keywords = self._load_sources(keywords_file)
+            source = raw_keywords.get("keywords") if isinstance(raw_keywords, dict) else raw_keywords
+            source = source if isinstance(source, list) else []
 
-            # Normalize input into a list
-            if isinstance(raw_keywords, dict):
-                source = raw_keywords.get("keywords") or []
-            else:
-                source = raw_keywords or []
-
-            # Ensure it's actually iterable list
-            if not isinstance(source, list):
-                source = []
-
-            result = []
-            for kw in source:
-                result.append(kw.lower())
-
-            self.keywords = result
+            self.keywords = [kw.strip().lower() for kw in source if isinstance(kw, str) and kw.strip()]
             self.logger.info(f"Loaded {len(self.keywords)} keywords.")
-
         except Exception as e:
             self.logger.error(f"Failed to load keywords from {keywords_file}: {e}")
             self.keywords = []
@@ -73,10 +76,13 @@ class FetcherNews:
     def _load_sources(self, path):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-        
+
     def _load_existing_links_from_mongo(self):
         if self.mongo_collection is None:
-            self.logger.warning("MongoDB not connected. Cannot check for duplicates.")
+            if self.mongo_enabled:
+                self.logger.warning("MongoDB not connected. Cannot check for duplicates.")
+            else:
+                self.logger.info("MongoDB duplicate check disabled.")
             return set()
         try:
             links = {doc["link"] for doc in self.mongo_collection.find({}, {"link": 1}) if "link" in doc}
@@ -105,6 +111,10 @@ class FetcherNews:
         try:
             text = (title + " " + self._strip_html(summary)).lower()
             matched = [kw for kw in self.keywords if kw in text]
+            if not matched:
+                regex_match = any(re.search(pattern, text) for pattern in self.DEFAULT_F1_PATTERNS)
+                if regex_match:
+                    return True
             if matched:
                 self.logger.debug(f"[MATCH] '{title}' -> {matched}")
             return bool(matched)
@@ -114,58 +124,55 @@ class FetcherNews:
 
     def _strip_html(self, text):
         try:
-            return re.sub(r"<[^>]+>", "", unescape(text))
+            return re.sub(r"<[^>]+>", "", unescape(text or ""))
         except Exception as e:
             self.logger.error(f"HTML stripping error: {e}")
             return text
 
     def getLatestNews(self):
         relevant_articles = []
-
-        #existing_links = self._load_existing_links()
         existing_links = self._load_existing_links_from_mongo()
+
         for source_name, feed_url in self.sources.items():
             try:
                 self.logger.info(f"Parsing: {source_name}")
                 feed = feedparser.parse(feed_url)
-                count = 0
+                if getattr(feed, "bozo", False):
+                    self.logger.warning(f"Malformed feed {source_name}: {getattr(feed, 'bozo_exception', '')}")
 
+                count = 0
                 for entry in feed.entries:
                     if count >= self.max_items_per_feed:
                         break
 
                     if entry.get("link", "") in existing_links:
-                        self.logger.debug(f"Skipping duplicate: {entry.get('title', '')}")
                         continue
 
                     try:
                         title = entry.get("title", "")
                         summary = entry.get("summary", "")
-
                         if not self._is_relevant(title, summary):
                             continue
 
                         published_struct = entry.get("published_parsed")
-
                         if isinstance(published_struct, time.struct_time):
                             published_parsed = datetime(*published_struct[:6]).isoformat()
                         else:
                             published_parsed = ""
 
-                        article = {
-                            "source": source_name,
-                            "title": title,
-                            "link": entry.get("link", ""),
-                            "summary": summary,
-                            "published": entry.get("published", ""),
-                            "published_parsed": published_parsed,
-                        }
-
-                        relevant_articles.append(article)
+                        relevant_articles.append(
+                            {
+                                "source": source_name,
+                                "title": title,
+                                "link": entry.get("link", ""),
+                                "summary": summary,
+                                "published": entry.get("published", ""),
+                                "published_parsed": published_parsed,
+                            }
+                        )
                         count += 1
                     except Exception as e:
                         self.logger.warning(f"Failed to parse article from {source_name}: {e}")
-
             except Exception as e:
                 self.logger.error(f"Failed to parse feed {source_name}: {e}")
 
@@ -175,13 +182,11 @@ class FetcherNews:
     def save_to_json(self, new_articles, output_path="news_dump.json"):
         try:
             existing = []
-
             if os.path.exists(output_path):
                 with open(output_path, "r", encoding="utf-8") as f:
                     existing = json.load(f)
 
             all_articles = existing + new_articles
-
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(all_articles, f, indent=2, ensure_ascii=False)
 
@@ -195,13 +200,11 @@ class FetcherNews:
             return
 
         count_inserted = 0
-
         for article in articles:
             link = article.get("link")
             if not link:
                 continue
             if self.mongo_collection.find_one({"link": link}):
-                self.logger.debug(f"Duplicate in MongoDB, skipping: {link}")
                 continue
             try:
                 self.mongo_collection.insert_one(article)
@@ -210,5 +213,3 @@ class FetcherNews:
                 self.logger.error(f"Mongo insert failed for {link}: {e}")
 
         self.logger.info(f"Inserted {count_inserted} new articles into MongoDB.")
-
-

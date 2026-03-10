@@ -1,86 +1,545 @@
-import json
-import re
-from html import unescape
-from bs4 import BeautifulSoup
-import time
 import asyncio
-import traceback
-from deep_translator import GoogleTranslator
-from components.news_fetcher import FetcherNews
+import hashlib
+import json
+import os
+import re
+import time
+import urllib.parse
+import urllib.request
+from datetime import datetime
+from datetime import timezone
+from html import escape
+from html import unescape
+
 from components.analyzer_openAI import GPTAnalyzer
+from components.news_fetcher import FetcherNews
 from components.telegram_publisher import TelegramPublisher
 
-API_KEY = "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"
-telegram = TelegramPublisher(telegram_token="1111111111:AAAAAA******", chat_id="****")
-telegramLog = TelegramPublisher(telegram_token="1111111111:AAAAAA******", chat_id="****")
 
-with open("config/prompts/prompts.json", "r", encoding="utf-8") as f:
-    prompts = json.load(f)
+def load_local_env(path: str = ".env") -> None:
+    if not os.path.exists(path):
+        return
+
+    with open(path, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+def fetch_json(url: str) -> list[dict]:
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def build_url(base: str, params: dict) -> str:
+    filtered = {k: v for k, v in params.items() if v not in (None, "")}
+    return f"{base}?{urllib.parse.urlencode(filtered)}"
+
+
+def parse_dt(value: str | None):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def get_active_openf1_session(meeting_key: str | None = None) -> tuple[bool, str]:
+    params = {}
+    if meeting_key:
+        params["meeting_key"] = meeting_key
+
+    sessions_url = build_url("https://api.openf1.org/v1/sessions", params)
+    sessions = fetch_json(sessions_url)
+    now = datetime.now(timezone.utc)
+
+    for row in sessions:
+        start = parse_dt(row.get("date_start"))
+        end = parse_dt(row.get("date_end"))
+        if not start or not end:
+            continue
+        if start <= now <= end:
+            name = str(row.get("session_name") or row.get("session_type") or "Active F1 session")
+            return True, name
+    return False, ""
+
 
 def clean_summary(summary_html: str) -> str:
     try:
-        summary_html = unescape(summary_html)
-        soup = BeautifulSoup(summary_html, "html.parser")
-        for a in soup.find_all("a"):
-            a.decompose()
-        clean_text = soup.get_text(separator=" ", strip=True)
+        summary_html = unescape(summary_html or "")
+        summary_html = re.sub(r"<a\b[^>]*>.*?</a>", " ", summary_html, flags=re.IGNORECASE | re.DOTALL)
+        clean_text = re.sub(r"<[^>]+>", " ", summary_html)
         clean_text = re.sub(r"\s+", " ", clean_text)
-        return clean_text
-    except Exception as e:
-        print(f"[clean_summary] Error: {e}")
-        return summary_html
+        return clean_text.strip()
+    except Exception:
+        return summary_html or ""
 
-async def main():
+
+def make_article_id(article: dict) -> str:
+    seed = article.get("link") or f"{article.get('title', '')}|{article.get('published', '')}"
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def format_raw_review_text(article: dict, position: int, total: int) -> str:
+    title = escape(article.get("title") or "Без заголовка")
+    source = escape(article.get("source") or "Unknown")
+    link = article.get("link") or ""
+    summary = escape((article.get("summary_clean") or "")[:900])
+
+    lines = [
+        f"<b>Review Queue</b> ({position}/{total})",
+        f"<b>{title}</b>",
+        f"Source: {source}",
+    ]
+
+    if link:
+        lines.append(f'<a href="{link}">Открыть источник</a>')
+    if summary:
+        lines.append("")
+        lines.append(summary)
+
+    return "\n".join(lines)
+
+
+def format_draft_review_text(article: dict, position: int, total: int) -> str:
+    title = escape(article.get("translated_title") or article.get("title") or "Без заголовка")
+    link = article.get("link") or ""
+    draft = escape((article.get("generated_post") or "")[:3500])
+    lines = [
+        f"<b>Review Queue</b> ({position}/{total})",
+        f"<b>Draft for:</b> {title}",
+    ]
+    if link:
+        lines.append(f'<a href="{link}">Открыть источник</a>')
+    lines.extend(["", draft or "Draft is empty"])
+    return "\n".join(lines)
+
+
+def build_generation_prompt(article: dict) -> str:
+    return (
+        "Сделай короткий пост для Telegram на русском про новость Формулы-1.\\n"
+        "Требования:\\n"
+        "1) 4-7 коротких строк.\\n"
+        "2) Добавь уместные эмодзи для удобного чтения, но максимум 2 эмодзи на весь пост.\\n"
+        "3) Без хэштегов и без выдуманных фактов.\\n"
+        "4) Тон: живой, но нейтральный.\\n"
+        "5) Не используй HTML-теги.\\n\\n"
+        "Формат ответа строго такой:\\n"
+        "TITLE_RU: <переведенный заголовок>\\n"
+        "POST_RU:\\n"
+        "<текст поста>\\n\\n"
+        f"Источник: {article.get('source', '')}\\n"
+        f"Заголовок: {article.get('title', '')}\\n"
+        f"Кратко: {article.get('summary_clean', '')}"
+    )
+
+
+def parse_generated_output(raw: str, fallback_title: str) -> tuple[str, str]:
+    text = (raw or "").strip()
+    title = fallback_title
+    post = text
+
+    title_match = re.search(r"TITLE_RU:\s*(.+)", text)
+    if title_match:
+        parsed_title = title_match.group(1).strip()
+        if parsed_title:
+            title = parsed_title
+
+    post_match = re.search(r"POST_RU:\s*(.*)", text, flags=re.DOTALL)
+    if post_match:
+        parsed_post = post_match.group(1).strip()
+        if parsed_post:
+            post = parsed_post
+
+    if not post:
+        post = text
+    return title, post
+
+
+def upsert_article_status(collection, article: dict, status: str, reviewer=None) -> None:
+    link = article.get("link")
+    if not link:
+        return
+
+    now = utc_now_iso()
+    set_fields = {
+        "source": article.get("source", ""),
+        "title": article.get("title", ""),
+        "link": link,
+        "summary": article.get("summary", ""),
+        "summary_clean": article.get("summary_clean", ""),
+        "translated_title": article.get("translated_title", ""),
+        "published": article.get("published", ""),
+        "published_parsed": article.get("published_parsed", ""),
+        "generated_post": article.get("generated_post", ""),
+        "status": status,
+        "updated_at": now,
+    }
+
+    if status == "queued":
+        set_fields["queued_at"] = now
+    if status in {"accepted", "declined", "skipped"}:
+        set_fields["decision_at"] = now
+        set_fields["reviewer"] = reviewer or "unknown"
+
+    collection.update_one(
+        {"link": link},
+        {
+            "$set": set_fields,
+            "$setOnInsert": {"created_at": now},
+        },
+        upsert=True,
+    )
+
+
+def load_pending_queue(collection, limit: int = 300) -> list[dict]:
+    docs = list(
+        collection.find({"status": {"$in": ["queued", "draft_ready"]}})
+        .sort("queued_at", 1)
+        .limit(limit)
+    )
+
+    queue = []
+    for doc in docs:
+        queue.append(
+            {
+                "id": make_article_id(doc),
+                "source": doc.get("source", ""),
+                "title": doc.get("title", ""),
+                "link": doc.get("link", ""),
+                "summary": doc.get("summary", ""),
+                "summary_clean": doc.get("summary_clean", ""),
+                "translated_title": doc.get("translated_title", ""),
+                "published": doc.get("published", ""),
+                "published_parsed": doc.get("published_parsed", ""),
+                "generated_post": doc.get("generated_post", ""),
+                "status": doc.get("status", "queued"),
+            }
+        )
+    return queue
+
+
+def get_review_payload(queue: list[dict], current_index: int) -> tuple[str, list[list[dict]], str]:
+    total = len(queue)
+    article = queue[current_index]
+    article_id = article["id"]
+
+    if article.get("status") == "draft_ready" and article.get("generated_post"):
+        text = format_draft_review_text(article, current_index + 1, total)
+        buttons = [
+            [
+                {"text": "Accept", "callback_data": f"final_accept:{article_id}"},
+                {"text": "Decline", "callback_data": f"final_decline:{article_id}"},
+            ]
+        ]
+        key = f"draft:{article_id}:{current_index}:{total}:{hash(article.get('generated_post', ''))}"
+        return text, buttons, key
+
+    text = format_raw_review_text(article, current_index + 1, total)
+    rows = [
+        [
+            {"text": "Accept", "callback_data": f"raw_accept:{article_id}"},
+            {"text": "Decline", "callback_data": f"raw_decline:{article_id}"},
+        ]
+    ]
+    rows.append(
+        [
+            {"text": "Next", "callback_data": "raw_next"},
+            {"text": "Skip all", "callback_data": "raw_skipall"},
+        ]
+    )
+
+    key = f"raw:{article_id}:{current_index}:{total}"
+    return text, rows, key
+
+
+async def main() -> None:
+    load_local_env()
+
+    telegram_token = os.getenv("TELEGRAM_TOKEN", "").strip()
+    telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    telegram_log_chat_id = os.getenv("TELEGRAM_LOG_CHAT_ID", "").strip()
+    openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+
+    if not telegram_token or not telegram_chat_id or not telegram_log_chat_id:
+        raise RuntimeError("Set TELEGRAM_TOKEN, TELEGRAM_CHAT_ID and TELEGRAM_LOG_CHAT_ID")
+
+    fetch_interval_sec = int(os.getenv("FETCH_INTERVAL_SEC", "300"))
+    idle_timeout_sec = int(os.getenv("REVIEW_IDLE_TIMEOUT_SEC", "1800"))
+    openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    block_news_during_openf1 = os.getenv("BLOCK_NEWS_DURING_OPENF1", "1").strip() == "1"
+    openf1_meeting_key = os.getenv("OPENF1_MEETING_KEY", "").strip() or None
+    openf1_check_interval_sec = int(os.getenv("OPENF1_CHECK_INTERVAL_SEC", "60"))
+
+    fetcher = FetcherNews("config/sources.json", "config/keywords.json", "config/mongo.json", 30, 50)
+    if fetcher.mongo_collection is None:
+        raise RuntimeError("MongoDB is required for review workflow")
+
+    telegram = TelegramPublisher(telegram_token=telegram_token, chat_id=telegram_chat_id)
+    analyzer = GPTAnalyzer(api_key=openai_api_key, model=openai_model, temperature=0.5, max_tokens=500) if openai_api_key else None
+
+    pending_queue = load_pending_queue(fetcher.mongo_collection)
+    queued_ids = {item["id"] for item in pending_queue}
+
+    print(f"Loaded {len(pending_queue)} queued items from DB")
+
+    offset = None
+    current_index = 0
+    review_message_id = None
+    rendered_key = None
+    last_reviewer_activity = time.monotonic()
+    last_fetch_at = 0.0
+    paused_for_idle = False
+    news_blocked_for_session = False
+    active_session_name = ""
+    last_openf1_check_at = 0.0
+
+    bootstrap_updates = await telegram.get_updates(timeout=0)
+    if bootstrap_updates:
+        offset = max(update.get("update_id", 0) for update in bootstrap_updates) + 1
+
     while True:
-        try:
-            fetcher = FetcherNews("config/sources.json", "config/keywords.json", "config/mongo.json", 30, 50)
-            openAIAnalyzer = GPTAnalyzer(api_key=API_KEY)
+        if block_news_during_openf1 and (time.monotonic() - last_openf1_check_at >= openf1_check_interval_sec):
+            try:
+                is_active, session_name = await asyncio.to_thread(get_active_openf1_session, openf1_meeting_key)
+                last_openf1_check_at = time.monotonic()
+                if is_active and not news_blocked_for_session:
+                    news_blocked_for_session = True
+                    active_session_name = session_name
+                    await telegram.send_log(
+                        f"News posting paused: active F1 session ({escape(active_session_name)}).",
+                        chat_id=telegram_log_chat_id,
+                    )
+                elif (not is_active) and news_blocked_for_session:
+                    news_blocked_for_session = False
+                    active_session_name = ""
+                    await telegram.send_log("News posting resumed: no active F1 session.", chat_id=telegram_log_chat_id)
+            except Exception as e:
+                last_openf1_check_at = time.monotonic()
+                print(f"[openf1-check] Error: {e}")
+
+        if pending_queue:
+            if current_index >= len(pending_queue):
+                current_index = 0
+
+            text, buttons, key = get_review_payload(pending_queue, current_index)
+            if review_message_id is None:
+                sent = await telegram.send_inline_message(telegram_log_chat_id, text, buttons)
+                review_message_id = sent.get("message_id") if isinstance(sent, dict) else None
+                rendered_key = key
+            elif rendered_key != key:
+                try:
+                    await telegram.edit_inline_message(telegram_log_chat_id, review_message_id, text, buttons)
+                    rendered_key = key
+                except Exception:
+                    sent = await telegram.send_inline_message(telegram_log_chat_id, text, buttons)
+                    review_message_id = sent.get("message_id") if isinstance(sent, dict) else None
+                    rendered_key = key
+        else:
+            review_message_id = None
+            rendered_key = None
+            current_index = 0
+
+        updates = await telegram.get_updates(offset=offset, timeout=2)
+        for update in updates:
+            offset = update.get("update_id", 0) + 1
+            callback = update.get("callback_query")
+            if callback is None:
+                continue
+
+            data = callback.get("data") or ""
+            from_user = callback.get("from", {})
+            reviewer = from_user.get("username") or str(from_user.get("id", "unknown"))
+            message = callback.get("message") or {}
+            cb_id = callback.get("id", "")
+
+            if str(message.get("chat", {}).get("id")) != str(telegram_log_chat_id):
+                await telegram.answer_callback(cb_id, "Wrong chat")
+                continue
+            if not pending_queue:
+                await telegram.answer_callback(cb_id, "Queue is empty")
+                continue
+
+            current = pending_queue[current_index]
+            current_id = current["id"]
+
+            if data.startswith("raw_accept:"):
+                article_id = data.split(":", 1)[1]
+                if article_id != current_id:
+                    await telegram.answer_callback(cb_id, "Item is outdated")
+                    continue
+                if not analyzer:
+                    await telegram.answer_callback(cb_id, "OPENAI_API_KEY is missing")
+                    continue
+
+                await telegram.answer_callback(cb_id, "Generating draft...")
+                prompt = build_generation_prompt(current)
+                draft = await asyncio.to_thread(analyzer.analyze, prompt)
+                draft = (draft or "").strip()
+                if not draft:
+                    await telegram.send_log("OpenAI returned empty draft", chat_id=telegram_log_chat_id)
+                    continue
+
+                translated_title, generated_post = parse_generated_output(draft, current.get("title") or "Без заголовка")
+                current["translated_title"] = translated_title
+                current["generated_post"] = generated_post
+                current["status"] = "draft_ready"
+                upsert_article_status(fetcher.mongo_collection, current, "draft_ready", reviewer=reviewer)
+                rendered_key = None
+                last_reviewer_activity = time.monotonic()
+
+            elif data.startswith("raw_decline:"):
+                article_id = data.split(":", 1)[1]
+                if article_id != current_id:
+                    await telegram.answer_callback(cb_id, "Item is outdated")
+                    continue
+
+                removed = pending_queue.pop(current_index)
+                queued_ids.discard(removed["id"])
+                upsert_article_status(fetcher.mongo_collection, removed, "declined", reviewer=reviewer)
+                if current_index >= len(pending_queue):
+                    current_index = 0
+                rendered_key = None
+                last_reviewer_activity = time.monotonic()
+                await telegram.answer_callback(cb_id, "Declined")
+
+            elif data == "raw_next":
+                if len(pending_queue) <= 1:
+                    await telegram.answer_callback(cb_id, "Only one item in queue")
+                    continue
+                current_index = (current_index + 1) % len(pending_queue)
+                rendered_key = None
+                last_reviewer_activity = time.monotonic()
+                await telegram.answer_callback(cb_id, "Next")
+
+            elif data == "raw_skipall":
+                for article in pending_queue:
+                    upsert_article_status(fetcher.mongo_collection, article, "skipped", reviewer=reviewer)
+                skipped_count = len(pending_queue)
+                pending_queue.clear()
+                queued_ids.clear()
+                current_index = 0
+                review_message_id = None
+                rendered_key = None
+                paused_for_idle = False
+                last_reviewer_activity = time.monotonic()
+                await telegram.answer_callback(cb_id, f"Skipped {skipped_count}")
+
+            elif data.startswith("final_accept:"):
+                article_id = data.split(":", 1)[1]
+                if article_id != current_id:
+                    await telegram.answer_callback(cb_id, "Item is outdated")
+                    continue
+                if current.get("status") != "draft_ready":
+                    await telegram.answer_callback(cb_id, "Draft is not ready")
+                    continue
+                if news_blocked_for_session:
+                    await telegram.answer_callback(
+                        cb_id,
+                        f"Paused during {active_session_name or 'active F1 session'}",
+                    )
+                    await telegram.send_log(
+                        f"Publish blocked during active session: {escape(active_session_name or 'F1 session')}",
+                        chat_id=telegram_log_chat_id,
+                        reply_to_message_id=message.get("message_id"),
+                    )
+                    continue
+
+                await telegram.publish(
+                    title=current.get("translated_title") or current.get("title") or "Без заголовка",
+                    full_output=current.get("generated_post") or "",
+                    article_url=current.get("link") or "",
+                )
+                removed = pending_queue.pop(current_index)
+                queued_ids.discard(removed["id"])
+                upsert_article_status(fetcher.mongo_collection, removed, "accepted", reviewer=reviewer)
+                await telegram.send_log(
+                    "<b>Decision:</b> accepted",
+                    chat_id=telegram_log_chat_id,
+                    reply_to_message_id=message.get("message_id"),
+                )
+                if current_index >= len(pending_queue):
+                    current_index = 0
+                rendered_key = None
+                last_reviewer_activity = time.monotonic()
+                await telegram.answer_callback(cb_id, "Posted")
+
+            elif data.startswith("final_decline:"):
+                article_id = data.split(":", 1)[1]
+                if article_id != current_id:
+                    await telegram.answer_callback(cb_id, "Item is outdated")
+                    continue
+
+                removed = pending_queue.pop(current_index)
+                queued_ids.discard(removed["id"])
+                upsert_article_status(fetcher.mongo_collection, removed, "declined", reviewer=reviewer)
+                await telegram.send_log(
+                    "<b>Decision:</b> declined",
+                    chat_id=telegram_log_chat_id,
+                    reply_to_message_id=message.get("message_id"),
+                )
+                if current_index >= len(pending_queue):
+                    current_index = 0
+                rendered_key = None
+                last_reviewer_activity = time.monotonic()
+                await telegram.answer_callback(cb_id, "Declined")
+
+            else:
+                await telegram.answer_callback(cb_id, "Unknown action")
+
+        idle_for = time.monotonic() - last_reviewer_activity
+        should_pause_for_idle = bool(pending_queue) and idle_for >= idle_timeout_sec
+
+        if should_pause_for_idle and not paused_for_idle:
+            paused_for_idle = True
+            await telegram.send_log(
+                f"Queue paused: no review input for {idle_timeout_sec // 60} min. Pending: {len(pending_queue)}",
+                chat_id=telegram_log_chat_id,
+            )
+
+        if not should_pause_for_idle and paused_for_idle:
+            paused_for_idle = False
+            await telegram.send_log("Queue resumed: review activity detected.", chat_id=telegram_log_chat_id)
+
+        if (not paused_for_idle) and (time.monotonic() - last_fetch_at >= fetch_interval_sec):
             articles = fetcher.getLatestNews()
-
+            added = 0
             for article in articles:
-                title = article.get("title")
-                link = article.get("link")
-                raw_summary = article.get("summary")
-                if not title and not raw_summary:
+                article["summary_clean"] = clean_summary(article.get("summary", ""))
+                article["translated_title"] = ""
+                article["generated_post"] = ""
+                article["status"] = "queued"
+                article_id = make_article_id(article)
+                if article_id in queued_ids:
                     continue
 
-                prompt_template = prompts #TODO: change to real promt
+                upsert_article_status(fetcher.mongo_collection, article, "queued")
+                article["id"] = article_id
+                pending_queue.append(article)
+                queued_ids.add(article_id)
+                added += 1
 
-                final_prompt = prompt_template["text"].format(claster_text=title)
-                final_summary = clean_summary(raw_summary)
+            last_fetch_at = time.monotonic()
+            if added:
+                rendered_key = None
+                await telegram.send_log(
+                    f"Queued {added} new items. Pending now: {len(pending_queue)}",
+                    chat_id=telegram_log_chat_id,
+                )
 
-                if not final_prompt and not final_summary:
-                    continue
+        await asyncio.sleep(1)
 
-                full_input = f"{prompt_template['text']}\n\nNews:\n{final_summary}"
-                output = openAIAnalyzer.analyze(full_input)
-
-                #translated_title = translate(title)
-                clean_output = convert_markers_to_html(output)
-
-                await telegram.publish(title=title, full_output=clean_output, article_url=link)
-
-                print("Sleeping for 1 minute...")
-                await asyncio.sleep(60)
-
-            fetcher.save_to_mongo(articles)
-
-        except Exception as e:
-            await telegramLog.sendLog(f"Exception:\n<pre>{traceback.format_exc()}</pre>")
-            print(f"Error: {e}")
-
-        print("Sleeping for 1 hour...")
-        await asyncio.sleep(60 * 60)
-
-
-def convert_markers_to_html(text: str) -> str:
-    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
-    text = re.sub(r"^###\s*(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
-    return text.strip()
-
-def translate(text_to_translate):
-    translator = GoogleTranslator(source='en', target='ru')
-    return translator.translate(text_to_translate)
 
 if __name__ == "__main__":
     asyncio.run(main())

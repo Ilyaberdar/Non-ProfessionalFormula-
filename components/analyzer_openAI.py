@@ -16,7 +16,7 @@ class GPTAnalyzer:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a geopolitical analyst who uses game theory. Respond in Russian."
+                        "content": "You are a Formula 1 editor. Write concise Telegram-ready posts in Russian with clear structure and no more than 2 emojis per post."
                     },
                     {
                         "role": "user",
