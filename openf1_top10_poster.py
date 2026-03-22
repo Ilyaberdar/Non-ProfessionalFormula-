@@ -1,6 +1,8 @@
+from __future__ import annotations
 import asyncio
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -27,8 +29,13 @@ def load_local_env(path: str = ".env") -> None:
 
 
 def fetch_json(url: str) -> list[dict]:
-    with urllib.request.urlopen(url, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return []
+        raise
 
 
 def build_url(base: str, params: dict) -> str:
@@ -45,7 +52,13 @@ def parse_dt(value: str | None):
         return None
 
 
-def discover_session_and_meeting(meeting_key: str | None) -> tuple[str | None, str | None, str | None]:
+def is_race_session(row: dict) -> bool:
+    session_name = (row.get("session_name") or "").lower()
+    session_type = (row.get("session_type") or "").lower()
+    return ("race" in session_name) or ("race" in session_type) or ("grand prix" in session_name)
+
+
+def discover_active_race_session(meeting_key: str | None) -> tuple[str | None, str | None, str | None]:
     params = {}
     if meeting_key:
         params["meeting_key"] = meeting_key
@@ -56,36 +69,22 @@ def discover_session_and_meeting(meeting_key: str | None) -> tuple[str | None, s
         return None, meeting_key, None
 
     now = datetime.now(timezone.utc)
-    race_sessions = []
-
+    ongoing_race_sessions = []
     for row in sessions:
-        session_name = (row.get("session_name") or "").lower()
-        session_type = (row.get("session_type") or "").lower()
-        is_race = ("race" in session_name) or ("race" in session_type) or ("grand prix" in session_name)
-        if not is_race:
+        if not is_race_session(row):
             continue
-        race_sessions.append(row)
-
-    if not race_sessions:
-        race_sessions = sessions
-
-    def key_start(item: dict):
-        dt = parse_dt(item.get("date_start"))
-        return dt or datetime.min.replace(tzinfo=timezone.utc)
-
-    ongoing = []
-    for row in race_sessions:
         start = parse_dt(row.get("date_start"))
         end = parse_dt(row.get("date_end"))
         if start and end and start <= now <= end:
-            ongoing.append(row)
+            ongoing_race_sessions.append(row)
 
-    if ongoing:
-        chosen = sorted(ongoing, key=key_start)[-1]
-    else:
-        past = [row for row in race_sessions if (parse_dt(row.get("date_start")) or now) <= now]
-        pool = past if past else race_sessions
-        chosen = sorted(pool, key=key_start)[-1]
+    if not ongoing_race_sessions:
+        return None, meeting_key, None
+
+    chosen = sorted(
+        ongoing_race_sessions,
+        key=lambda item: parse_dt(item.get("date_start")) or datetime.min.replace(tzinfo=timezone.utc),
+    )[-1]
 
     resolved_session = str(chosen.get("session_key") or "")
     resolved_meeting = str(chosen.get("meeting_key") or "") or meeting_key
@@ -192,10 +191,13 @@ async def main() -> None:
             session_name = f"Session {session_key}" if session_key else "Unknown session"
             if auto_session_mode:
                 session_key, meeting_key, session_name = await asyncio.to_thread(
-                    discover_session_and_meeting, configured_meeting_key
+                    discover_active_race_session, configured_meeting_key
                 )
                 if not session_key:
-                    print("No OpenF1 session found yet")
+                    print("No active race session found")
+                    last_payload = None
+                    last_resolved_session = None
+                    last_session_name = None
                     await asyncio.sleep(poll_seconds)
                     continue
                 if session_key != last_resolved_session:
@@ -211,6 +213,10 @@ async def main() -> None:
                 session_name = last_session_name
 
             positions = await asyncio.to_thread(get_latest_positions, session_key, meeting_key, max_positions)
+            if not positions:
+                print(f"No position data yet for session_key={session_key}")
+                await asyncio.sleep(poll_seconds)
+                continue
             names = await asyncio.to_thread(get_driver_names, session_key, meeting_key)
             message = format_top10_message(positions, names, session_key, session_name)
 
