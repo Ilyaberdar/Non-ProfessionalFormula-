@@ -10,9 +10,13 @@ jobs:
     runs-on: self-hosted
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Deploy containers
         env:
-          REPO_DIR: /home/quant-intelligence/Desktop/github/Non-ProfessionalFormula-
+          PERSISTENT_APP_DIR: /home/quant-intelligence/Desktop/github/Non-ProfessionalFormula-
+          ENV_FILE: /home/quant-intelligence/Desktop/github/Non-ProfessionalFormula-/.env
+          LOGS_DIR: /home/quant-intelligence/Desktop/github/Non-ProfessionalFormula-/logs
         run: |
-          cd "$REPO_DIR"
-          ./deploy/deploy.sh
+          ./deploy/redeploy.sh

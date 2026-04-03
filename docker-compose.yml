@@ -5,11 +5,11 @@ services:
     container_name: npf-main
     restart: unless-stopped
     env_file:
-      - .env
+      - ${ENV_FILE:-.env}
     environment:
       APP_FILE: main.py
     volumes:
-      - ./logs:/app/logs
+      - ${LOGS_DIR:-./logs}:/app/logs
 
   openf1:
     build:
@@ -17,8 +17,8 @@ services:
     container_name: npf-openf1
     restart: unless-stopped
     env_file:
-      - .env
+      - ${ENV_FILE:-.env}
     environment:
       APP_FILE: openf1_top10_poster.py
     volumes:
-      - ./logs:/app/logs
+      - ${LOGS_DIR:-./logs}:/app/logs
