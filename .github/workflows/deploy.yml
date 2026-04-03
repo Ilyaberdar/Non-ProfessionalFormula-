@@ -24,6 +24,9 @@ jobs:
           id
           ls -la
           ls -la "$PERSISTENT_APP_DIR"
+          if [ ! -f "$ENV_FILE" ] && [ -f "${PERSISTENT_APP_DIR}/env" ]; then
+            export ENV_FILE="${PERSISTENT_APP_DIR}/env"
+          fi
           test -f "$ENV_FILE"
           docker version
           docker compose version

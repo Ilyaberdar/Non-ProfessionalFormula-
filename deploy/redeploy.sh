@@ -9,6 +9,10 @@ ENV_FILE="${ENV_FILE:-${PERSISTENT_APP_DIR}/.env}"
 LOGS_DIR="${LOGS_DIR:-${PERSISTENT_APP_DIR}/logs}"
 LOG_FILE="${LOG_FILE:-${PERSISTENT_APP_DIR}/deploy/deploy.log}"
 
+if [[ ! -f "${ENV_FILE}" && -f "${PERSISTENT_APP_DIR}/env" ]]; then
+  ENV_FILE="${PERSISTENT_APP_DIR}/env"
+fi
+
 mkdir -p "$(dirname "${LOCK_FILE}")"
 mkdir -p "$(dirname "${LOG_FILE}")"
 mkdir -p "${LOGS_DIR}"
