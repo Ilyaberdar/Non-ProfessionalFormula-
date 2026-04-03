@@ -19,4 +19,12 @@ jobs:
           ENV_FILE: /home/quant-intelligence/Desktop/github/Non-ProfessionalFormula-/.env
           LOGS_DIR: /home/quant-intelligence/Desktop/github/Non-ProfessionalFormula-/logs
         run: |
+          set -x
+          pwd
+          id
+          ls -la
+          ls -la "$PERSISTENT_APP_DIR"
+          test -f "$ENV_FILE"
+          docker version
+          docker compose version
           bash ./deploy/redeploy.sh

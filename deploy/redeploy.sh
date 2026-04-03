@@ -4,10 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 LOCK_FILE="${LOCK_FILE:-${REPO_DIR}/deploy/.redeploy.lock}"
-LOG_FILE="${LOG_FILE:-${REPO_DIR}/deploy/deploy.log}"
 PERSISTENT_APP_DIR="${PERSISTENT_APP_DIR:-/home/quant-intelligence/Desktop/github/Non-ProfessionalFormula-}"
 ENV_FILE="${ENV_FILE:-${PERSISTENT_APP_DIR}/.env}"
 LOGS_DIR="${LOGS_DIR:-${PERSISTENT_APP_DIR}/logs}"
+LOG_FILE="${LOG_FILE:-${PERSISTENT_APP_DIR}/deploy/deploy.log}"
 
 mkdir -p "$(dirname "${LOCK_FILE}")"
 mkdir -p "$(dirname "${LOG_FILE}")"
