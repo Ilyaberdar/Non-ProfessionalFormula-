@@ -2,7 +2,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time 
-import urllib.error 
+import urllib.error  
 import urllib.request
 from html import escape as html_escape
 
