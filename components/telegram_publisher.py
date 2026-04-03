@@ -4,7 +4,7 @@ import json
 import time 
 import urllib.error  
 import urllib.request
-from html import escape as html_escape
+from html import escape as html_escape 
 
 
 class TelegramPublisher:
