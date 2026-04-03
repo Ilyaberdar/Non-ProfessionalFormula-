@@ -1,0 +1,24 @@
+services:
+  main:
+    build:
+      context: .
+    container_name: npf-main
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APP_FILE: main.py
+    volumes:
+      - ./logs:/app/logs
+
+  openf1:
+    build:
+      context: .
+    container_name: npf-openf1
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APP_FILE: openf1_top10_poster.py
+    volumes:
+      - ./logs:/app/logs

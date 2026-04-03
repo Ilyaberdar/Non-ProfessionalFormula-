@@ -277,7 +277,6 @@ async def main() -> None:
         raise RuntimeError("Set TELEGRAM_TOKEN, TELEGRAM_CHAT_ID and TELEGRAM_LOG_CHAT_ID")
 
     fetch_interval_sec = int(os.getenv("FETCH_INTERVAL_SEC", "300"))
-    idle_timeout_sec = int(os.getenv("REVIEW_IDLE_TIMEOUT_SEC", "1800"))
     openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     block_news_during_openf1 = os.getenv("BLOCK_NEWS_DURING_OPENF1", "1").strip() == "1"
     openf1_meeting_key = os.getenv("OPENF1_MEETING_KEY", "").strip() or None
@@ -299,9 +298,7 @@ async def main() -> None:
     current_index = 0
     review_message_id = None
     rendered_key = None
-    last_reviewer_activity = time.monotonic()
     last_fetch_at = 0.0
-    paused_for_idle = False
     news_blocked_for_session = False
     active_session_name = ""
     last_openf1_check_at = 0.0
@@ -338,15 +335,15 @@ async def main() -> None:
             if review_message_id is None:
                 sent = await telegram.send_inline_message(telegram_log_chat_id, text, buttons)
                 review_message_id = sent.get("message_id") if isinstance(sent, dict) else None
-                rendered_key = key
+                rendered_key = key if review_message_id is not None else None
             elif rendered_key != key:
-                try:
-                    await telegram.edit_inline_message(telegram_log_chat_id, review_message_id, text, buttons)
+                edited = await telegram.edit_inline_message(telegram_log_chat_id, review_message_id, text, buttons)
+                if edited is not None:
                     rendered_key = key
-                except Exception:
+                else:
                     sent = await telegram.send_inline_message(telegram_log_chat_id, text, buttons)
                     review_message_id = sent.get("message_id") if isinstance(sent, dict) else None
-                    rendered_key = key
+                    rendered_key = key if review_message_id is not None else None
         else:
             review_message_id = None
             rendered_key = None
@@ -398,7 +395,6 @@ async def main() -> None:
                 current["status"] = "draft_ready"
                 upsert_article_status(fetcher.mongo_collection, current, "draft_ready", reviewer=reviewer)
                 rendered_key = None
-                last_reviewer_activity = time.monotonic()
 
             elif data.startswith("raw_decline:"):
                 article_id = data.split(":", 1)[1]
@@ -412,7 +408,6 @@ async def main() -> None:
                 if current_index >= len(pending_queue):
                     current_index = 0
                 rendered_key = None
-                last_reviewer_activity = time.monotonic()
                 await telegram.answer_callback(cb_id, "Declined")
 
             elif data == "raw_next":
@@ -421,7 +416,6 @@ async def main() -> None:
                     continue
                 current_index = (current_index + 1) % len(pending_queue)
                 rendered_key = None
-                last_reviewer_activity = time.monotonic()
                 await telegram.answer_callback(cb_id, "Next")
 
             elif data == "raw_skipall":
@@ -433,8 +427,6 @@ async def main() -> None:
                 current_index = 0
                 review_message_id = None
                 rendered_key = None
-                paused_for_idle = False
-                last_reviewer_activity = time.monotonic()
                 await telegram.answer_callback(cb_id, f"Skipped {skipped_count}")
 
             elif data.startswith("final_accept:"):
@@ -473,7 +465,6 @@ async def main() -> None:
                 if current_index >= len(pending_queue):
                     current_index = 0
                 rendered_key = None
-                last_reviewer_activity = time.monotonic()
                 await telegram.answer_callback(cb_id, "Posted")
 
             elif data.startswith("final_decline:"):
@@ -493,27 +484,12 @@ async def main() -> None:
                 if current_index >= len(pending_queue):
                     current_index = 0
                 rendered_key = None
-                last_reviewer_activity = time.monotonic()
                 await telegram.answer_callback(cb_id, "Declined")
 
             else:
                 await telegram.answer_callback(cb_id, "Unknown action")
 
-        idle_for = time.monotonic() - last_reviewer_activity
-        should_pause_for_idle = bool(pending_queue) and idle_for >= idle_timeout_sec
-
-        if should_pause_for_idle and not paused_for_idle:
-            paused_for_idle = True
-            await telegram.send_log(
-                f"Queue paused: no review input for {idle_timeout_sec // 60} min. Pending: {len(pending_queue)}",
-                chat_id=telegram_log_chat_id,
-            )
-
-        if not should_pause_for_idle and paused_for_idle:
-            paused_for_idle = False
-            await telegram.send_log("Queue resumed: review activity detected.", chat_id=telegram_log_chat_id)
-
-        if (not paused_for_idle) and (time.monotonic() - last_fetch_at >= fetch_interval_sec):
+        if time.monotonic() - last_fetch_at >= fetch_interval_sec:
             articles = fetcher.getLatestNews()
             added = 0
             for article in articles:
