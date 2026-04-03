@@ -29,6 +29,9 @@ log() {
 
 cd "${REPO_DIR}"
 
+log "removing existing containers with fixed names"
+docker rm -f npf-main npf-openf1 >/dev/null 2>&1 || true
+
 log "building and restarting containers from runner workspace"
 docker compose up -d --build --remove-orphans
 log "redeploy complete"
