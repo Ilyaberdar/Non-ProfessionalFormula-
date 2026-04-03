@@ -19,4 +19,4 @@ jobs:
           ENV_FILE: /home/quant-intelligence/Desktop/github/Non-ProfessionalFormula-/.env
           LOGS_DIR: /home/quant-intelligence/Desktop/github/Non-ProfessionalFormula-/logs
         run: |
-          ./deploy/redeploy.sh
+          bash ./deploy/redeploy.sh
