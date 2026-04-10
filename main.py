@@ -127,7 +127,7 @@ def format_draft_review_text(article: dict, position: int, total: int) -> str:
     return "\n".join(lines)
 
 
-ef build_generation_prompt(article: dict) -> str:
+def build_generation_prompt(article: dict) -> str:
     return (
         "Сделай пост для Telegram на русском про новость Формулы-1.\n"
         "Требования:\n"
