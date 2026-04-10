@@ -42,11 +42,12 @@ class TelegramPublisher:
 
     async def publish(self, title: str, full_output: str, article_url: str):
         try:
-            safe_title = html_escape(title or "")
+            safe_title = title or ""
             safe_output = html_escape(full_output or "")
             safe_link = html_escape(article_url or "")
-            source_link = f'\n\n<a href="{safe_link}">Читать источник</a>' if safe_link else ""
-            text = f"<b>{safe_title}</b>\n\n{safe_output}{source_link}"
+            channel_url = "https://t.me/nonprofessional_f1"
+            footer = f'\n\n<a href="{channel_url}">(Не)профессиональная формула • Подписаться</a> | 📰 <a href="{safe_link}">Источник</a>' if safe_link else ""
+            text = f"{safe_title}\n\n{safe_output}{footer}"
             await self._post(
                 "sendMessage",
                 {
