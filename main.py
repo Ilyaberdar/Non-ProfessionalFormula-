@@ -159,16 +159,6 @@ def build_generation_prompt(article: dict) -> str:
     )
 
 
-def build_final_post(post_text: str, article: dict) -> str:
-    channel_url = "https://t.me/nonprofessional_f1"
-    source_url = article.get('url', '')
-
-    footer = (
-        f'<a href="{channel_url}">(Не)профессиональная формула • Подписаться</a>'
-        f' | 📰 <a href="{source_url}">Источник</a>'
-    )
-
-
 def parse_generated_output(raw: str, fallback_title: str) -> tuple[str, str]:
     text = (raw or "").strip()
     title = fallback_title
